@@ -45,9 +45,11 @@ enum BLINK_MODES {
 
 #define ADDITIONAL_PRESCALER(PRESCALER)     (256 - (PRESCALER))
 #define INIT_TCNT0  ADDITIONAL_PRESCALER(4)
+#define INIT_TCNT2  ADDITIONAL_PRESCALER(125)
 
 uint8_t colors[LED_BUSES] = {0};
 int mode = 0;
+uint32_t clocks_ms = 0;
 
 void tick_led_buses(bool reset);
 void init_mode(int blink_mode, int color);
@@ -69,23 +71,33 @@ inline int get_color_mode()
 
 int main(void)
 {
-    DDRD = 0xff & (~(1 << PORTD2));    // Port D for output
-    DDRB = 0b111;   // Bits 0..2 of port B for output
+    DDRD = 0xff & (~(1 << PORTD2));       // Port D for output excluding D2 (INT0)
+    DDRB = 0b111;                         // Bits 0..2 of port B for output
 
-    PORTB &= 0b11111000;  // reset bits 0..2 in port B
-    PORTD =  0b11111001;  // switch on all indicators plus set high level to RST pin of counter chip
-    _delay_ms(500);       // show start of program
-    PORTD =  0b00000000;  // switch off all indicators plus set low level to RST pin of counter chip (reset the counter)
+    PORTB &= 0b11111000;                  // reset bits 0..2 in port B
+    PORTD =  0b11111001 | (1 << PORTD2);  // switch on all indicators, set high level to RST pin of counter chip, pull-up D2
+    _delay_ms(500);                       // show start of program
+    PORTD &= 0b00000000 | (1 << PORTD2);  // switch off all indicators plus set low level to RST pin of counter chip (reset the counter)
 
     // Timer 0
-    TIMSK |= (1 << TOIE0);  // enabled interrupts on overflow timer0
-    TCCR0 |= (1 << CS02);   // set prescaler to 256 and start the timer0
+    TIMSK |= (1 << TOIE0);                // enabled interrupts on overflow timer0
+    TCCR0 |= (1 << CS02);                 // set prescaler to 256 and start the timer0
 
     // Timer 1
-    OCR1A = 325;                            // about 3Hz
-    TCCR1B |= (1 << WGM12);                 // Mode 4, CTC on OCR1A
-    TIMSK |= (1 << OCIE1A);                 // Set interrupt on compare match
-    TCCR1B |= (1 << CS12) | (1 << CS10);    // set prescaler to 1024 and start the timer1
+    OCR1A = 325;                          // about 3Hz
+    TCCR1B |= (1 << WGM12);               // Mode 4, CTC on OCR1A
+    TIMSK |= (1 << OCIE1A);               // Set interrupt on compare match
+    TCCR1B |= (1 << CS12) | (1 << CS10);  // set prescaler to 1024 and start the timer1
+
+    // Timer 2
+    TCCR2 |= (1 << CS21);  // set prescale to 8 for timer2
+    TCCR2 &= ~((1 << WGM21) | (1 << WGM20));  // set mode to Normal
+    TIMSK |= (1 << TOIE2);  // enabled interrupts on overflow timer2
+    TCNT2 = INIT_TCNT2;
+
+    // INT0
+    MCUCR |= (1 << ISC01) | (1 << ISC00);  // set ISC01 and ISC00, the rising edge INT0
+    GICR |= (1 << INT0);                      // Turns on INT0
 
     init_mode(BLINK_STRIP, MUTABLE_ROLL);
 
@@ -189,8 +201,6 @@ ISR (TIMER1_COMPA_vect)
 {
     static uint8_t colors_copy[LED_BUSES];
 
-    PORTD ^= 0b10000000;
-
     switch(get_blink_mode())
     {
         case BLINK_BLINK:
@@ -249,4 +259,27 @@ ISR (TIMER1_COMPA_vect)
         }
         first_off = !first_off;
     }
+}
+
+// timer2 overflow interrupt
+ISR (TIMER2_OVF_vect)
+{
+    ++clocks_ms;
+
+    PORTD ^= 0b01000000;
+
+    TCNT2 = INIT_TCNT2;
+}
+
+// INT0 interrupt
+ISR (INT0_vect)
+{
+    static uint32_t last_ms = 0;
+
+    if ((clocks_ms - last_ms) > 50)
+    {
+        PORTD ^= 0b10000000;
+    }
+
+    last_ms = clocks_ms;
 }
