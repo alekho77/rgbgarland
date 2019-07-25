@@ -74,7 +74,8 @@ int main(void)
     DDRD = 0xff & (~(1 << PORTD2));       // Port D for output excluding D2 (INT0)
     DDRB = 0b111;                         // Bits 0..2 of port B for output
 
-    PORTB &= 0b11111000;                  // reset bits 0..2 in port B
+    PORTB = 0b11000000;                  // reset in port B, pull-up bits B6 and B7
+
     PORTD =  0b11111001 | (1 << PORTD2);  // switch on all indicators, set high level to RST pin of counter chip, pull-up D2
     _delay_ms(500);                       // show start of program
     PORTD &= 0b00000000 | (1 << PORTD2);  // switch off all indicators plus set low level to RST pin of counter chip (reset the counter)
@@ -99,10 +100,29 @@ int main(void)
     MCUCR |= (1 << ISC01) | (1 << ISC00);  // set ISC01 and ISC00, the rising edge INT0
     GICR |= (1 << INT0);                      // Turns on INT0
 
-    init_mode(BLINK_STRIP, MUTABLE_ROLL);
+    init_mode(BLINK_STATIC, RED);
 
+    uint8_t prev_rotar = (PINB >> 6) & 0b11;
+    int x = 2;
     while (1)
     {
+        uint8_t curr_rotar = (PINB >> 6) & 0b11;
+        if (curr_rotar != prev_rotar)
+        {
+            if (curr_rotar == 0b10)  // CW
+            {
+                x = (x + 1) % 4;
+            } 
+            else if (curr_rotar == 0b01)  // CCW
+            {
+                x = x > 0 ? x - 1 : 3;
+            }
+            prev_rotar = curr_rotar;
+            cli();
+            PORTD = (PORTD & 0b10000111) | (1 << (3 + x));
+            sei();
+            _delay_ms(50);
+        }
     }
 }
 
@@ -265,9 +285,6 @@ ISR (TIMER1_COMPA_vect)
 ISR (TIMER2_OVF_vect)
 {
     ++clocks_ms;
-
-    PORTD ^= 0b01000000;
-
     TCNT2 = INIT_TCNT2;
 }
 
