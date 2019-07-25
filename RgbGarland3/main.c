@@ -62,6 +62,11 @@ inline int get_blink_mode()
     return (mode >> 4) & 0b111;
 }
 
+inline int get_color_mode()
+{
+    return mode & 0xf;
+}
+
 int main(void)
 {
     DDRD = 0xff & (~(1 << PORTD2));    // Port D for output
@@ -82,7 +87,7 @@ int main(void)
     TIMSK |= (1 << OCIE1A);                 // Set interrupt on compare match
     TCCR1B |= (1 << CS12) | (1 << CS10);    // set prescaler to 1024 and start the timer1
 
-    init_mode(BLINK_BLINK, MUTABLE_MRANDOM);
+    init_mode(BLINK_STRIP, MUTABLE_ROLL);
 
     while (1)
     {
@@ -182,25 +187,38 @@ void tick_led_buses(bool reset)
 // timer1 compare match interrupt
 ISR (TIMER1_COMPA_vect)
 {
+    static uint8_t colors_copy[LED_BUSES];
+
     PORTD ^= 0b10000000;
 
-    mode ^= BLINK_OFF_FLAG;
-    if (get_blink_mode() == BLINK_BLINK)
+    switch(get_blink_mode())
     {
-        static uint8_t colors_copy[LED_BUSES];
-        if (mode & BLINK_OFF_FLAG)
-        {
-            memcpy(colors_copy, colors, LED_BUSES);
-            memset(colors, BLACK, LED_BUSES);
-            PORTD ^= 0b00100000;
-            return;
-        }
-        else
-        {
-            memcpy(colors, colors_copy, LED_BUSES);
-        }
+        case BLINK_BLINK:
+            mode ^= BLINK_OFF_FLAG;
+            if (mode & BLINK_OFF_FLAG)
+            {
+                memcpy(colors_copy, colors, LED_BUSES);
+                memset(colors, BLACK, LED_BUSES);
+                return;
+            }
+            else
+            {
+                memcpy(colors, colors_copy, LED_BUSES);
+            }
+            break;
+        case BLINK_STRIP:
+            if (!(mode & BLINK_OFF_FLAG))
+            {
+                memcpy(colors_copy, colors, LED_BUSES);
+                mode |= BLINK_OFF_FLAG;
+            } 
+            else
+            {
+                memcpy(colors, colors_copy, LED_BUSES);
+            }
+            break;
     }
-    switch(mode & 0xf)
+    switch(get_color_mode())
     {
         case MUTABLE_CYCLE:
         case MUTABLE_ROLL:
@@ -221,6 +239,14 @@ ISR (TIMER1_COMPA_vect)
         default:
             break;
     }
-
-    PORTD ^= 0b01000000;
+    if (get_blink_mode() == BLINK_STRIP)
+    {
+        static bool first_off = true;
+        memcpy(colors_copy, colors, LED_BUSES);
+        for (int i = first_off ? 0 : 1; i < LED_BUSES; i += 2)
+        {
+            colors[i] = BLACK;
+        }
+        first_off = !first_off;
+    }
 }
