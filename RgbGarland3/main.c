@@ -19,21 +19,22 @@
 
 #define LED_BUSES 5
 
-#define MUTABLE_COLOR_FLAG  (0b1000)
 enum COLORS
 {
-    BLACK           = (0b0000),
-    RED             = (0b0100),
-    GREEN           = (0b0010),
-    BLUE            = (0b001),
-    MAGENTA         = (RED | BLUE),
-    CYAN            = (GREEN | BLUE),
-    YELLOW          = (RED | GREEN),
-    WHITE           = (RED | GREEN | BLUE),
-    MUTABLE_CYCLE   = (MUTABLE_COLOR_FLAG + 0),
-    MUTABLE_SRANDOM = (MUTABLE_COLOR_FLAG + 1),
-    MUTABLE_ROLL    = (MUTABLE_COLOR_FLAG + 2),
-    MUTABLE_MRANDOM = (MUTABLE_COLOR_FLAG + 3),
+    BLACK           = 0b0000,
+    RED             = 0b0100,
+    GREEN           = 0b0010,
+    BLUE            = 0b0001,
+    MAGENTA         = RED | BLUE,
+    CYAN            = GREEN | BLUE,
+    YELLOW          = RED | GREEN,
+    WHITE           = RED | GREEN | BLUE,
+
+    MUTABLE_COLOR_FLAG = 0b1000,
+    MUTABLE_CYCLE   = MUTABLE_COLOR_FLAG + 0,
+    MUTABLE_SRANDOM = MUTABLE_COLOR_FLAG + 1,
+    MUTABLE_ROLL    = MUTABLE_COLOR_FLAG + 2,
+    MUTABLE_MRANDOM = MUTABLE_COLOR_FLAG + 3,
 };
 
 enum BLINK_MODES
@@ -53,15 +54,18 @@ enum SELECT_MODES
 {
     SELECT_NONE,
     SELECT_COLOR,
-    SELECT_MODE,
+    SELECT_BLINK,
 };
 
 #define SELECT_WD_TIMEOUT 5000
 
+uint32_t clocks_ms = 0;
+
 uint8_t colors[LED_BUSES] = {0};
 int mode = 0;
 int select = SELECT_NONE;
-uint32_t clocks_ms = 0;
+int selected_color = 0;
+int selected_blink = 0;
 uint32_t select_wd_clock = 0;
 
 void tick_led_buses(bool reset);
@@ -118,31 +122,51 @@ int main(void)
 
     // INT0
     MCUCR |= (1 << ISC01) | (1 << ISC00);  // set ISC01 and ISC00, the rising edge INT0
-    GICR |= (1 << INT0);                      // Turns on INT0
+    GICR |= (1 << INT0);                   // Turns on INT0
 
     init_mode(BLINK_STATIC, MUTABLE_CYCLE);
     sei();  // Enable interrupts
 
     uint8_t prev_rotar = (PINB >> 6) & 0b11;
-    int x = 2;
     while (1)
     {
         uint8_t curr_rotar = (PINB >> 6) & 0b11;
         if (curr_rotar != prev_rotar)
         {
-            if (curr_rotar == 0b10)  // CW
+            if (select != SELECT_NONE)
             {
-                x = (x + 1) % 4;
-            } 
-            else if (curr_rotar == 0b01)  // CCW
-            {
-                x = x > 0 ? x - 1 : 3;
+                int delta = 0;
+                if (curr_rotar == 0b10)  // CW
+                {
+                    delta = 1;
+                }
+                else if (curr_rotar == 0b01)  // CCW
+                {
+                    delta = -1;
+                }
+                cli();
+                switch(select)
+                {
+                    case SELECT_COLOR:
+                        selected_color += delta;
+                        if (selected_color < 1)
+                        {
+                            selected_color = MUTABLE_MRANDOM;
+                        } 
+                        else if (selected_color > MUTABLE_MRANDOM)
+                        {
+                            selected_color = 1;
+                        }
+                        break;
+                    case SELECT_BLINK:
+                        break;
+                    default:
+                        break;
+                }
+                reset_select_watchdog();
+                sei();
             }
             prev_rotar = curr_rotar;
-            cli();
-            //PORTD = (PORTD & 0b10000111) | (1 << (3 + x));
-            reset_select_watchdog();
-            sei();
             _delay_ms(50);
         }
     }
@@ -301,6 +325,32 @@ ISR (TIMER1_COMPA_vect)
         }
         first_off = !first_off;
     }
+
+    if (select != SELECT_NONE)
+    {
+        PORTD ^= 1 << PORTD7;
+        PORTC &= 0b11000000;
+        static uint8_t curr_color = 1;
+        curr_color = curr_color % 7 + 1;
+        switch(selected_color)
+        {
+            case MUTABLE_CYCLE:
+                PORTC |= (1 << PORTC3) | curr_color;
+                break;
+            case MUTABLE_SRANDOM:
+                PORTC |= (1 << PORTC4) | (1 << PORTC3) | rand_color();
+                break;
+            case MUTABLE_ROLL:
+                PORTC |= (1 << PORTC5) | curr_color;
+                break;
+            case MUTABLE_MRANDOM:
+                PORTC |= (1 << PORTC5) | (1 << PORTC4) | rand_color();
+                break;
+            default:
+                PORTC |= selected_color; 
+                break;
+        }
+    }
 }
 
 // timer2 overflow interrupt
@@ -308,17 +358,11 @@ ISR (TIMER2_OVF_vect)
 {
     ++clocks_ms;
 
-    if (select != SELECT_NONE && (clocks_ms % 100) == 0)
+    if (select != SELECT_NONE && (clocks_ms - select_wd_clock) >= SELECT_WD_TIMEOUT)
     {
-        if ((clocks_ms - select_wd_clock) >= SELECT_WD_TIMEOUT)
-        {
-            select = SELECT_NONE;
-            PORTD |= 1 << PORTD7;
-        }
-        else
-        {
-            PORTD ^= 1 << PORTD7;
-        }
+        select = SELECT_NONE;
+        PORTD |= 1 << PORTD7;
+        PORTC &= 0b11000000;
     }
 
     TCNT2 = INIT_TCNT2;
@@ -331,17 +375,26 @@ ISR (INT0_vect)
 
     if ((clocks_ms - last_ms) > 50)
     {
-        if (select == SELECT_MODE)
+        switch(select)
         {
-            // init_mode
-            select = SELECT_NONE;
-            PORTD |= 1 << PORTD7;
+            case SELECT_NONE:
+                selected_blink = get_blink_mode();
+                selected_color = get_color_mode();
+                select = SELECT_COLOR;
+                break;
+            case SELECT_COLOR:
+                select = SELECT_BLINK;
+                break;
+            case SELECT_BLINK:
+                init_mode(selected_blink, selected_color);
+                select = SELECT_NONE;
+                PORTD |= 1 << PORTD7;
+                PORTC &= 0b11000000;
+                break;
+            default:
+                break;
         }
-        else
-        {
-            ++select;
-            reset_select_watchdog();
-        }
+        reset_select_watchdog();
     }
 
     last_ms = clocks_ms;
