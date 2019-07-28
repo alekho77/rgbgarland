@@ -19,23 +19,26 @@
 
 #define LED_BUSES 5
 
-#define MUTABLE_COLOR_FLAG  (0b1000)
-enum COLORS {
-    BLACK           = (0b0000),
-    RED             = (0b0100),
-    GREEN           = (0b0010),
-    BLUE            = (0b001),
-    MAGENTA         = (RED | BLUE),
-    CYAN            = (GREEN | BLUE),
-    YELLOW          = (RED | GREEN),
-    WHITE           = (RED | GREEN | BLUE),
-    MUTABLE_CYCLE   = (MUTABLE_COLOR_FLAG + 0),
-    MUTABLE_SRANDOM = (MUTABLE_COLOR_FLAG + 1),
-    MUTABLE_ROLL    = (MUTABLE_COLOR_FLAG + 2),
-    MUTABLE_MRANDOM = (MUTABLE_COLOR_FLAG + 3),
+enum COLORS
+{
+    BLACK           = 0b0000,
+    RED             = 0b0100,
+    GREEN           = 0b0010,
+    BLUE            = 0b0001,
+    MAGENTA         = RED | BLUE,
+    CYAN            = GREEN | BLUE,
+    YELLOW          = RED | GREEN,
+    WHITE           = RED | GREEN | BLUE,
+
+    MUTABLE_COLOR_FLAG = 0b1000,
+    MUTABLE_CYCLE   = MUTABLE_COLOR_FLAG + 0,
+    MUTABLE_SRANDOM = MUTABLE_COLOR_FLAG + 1,
+    MUTABLE_ROLL    = MUTABLE_COLOR_FLAG + 2,
+    MUTABLE_MRANDOM = MUTABLE_COLOR_FLAG + 3,
 };
 
-enum BLINK_MODES {
+enum BLINK_MODES
+{
     BLINK_STATIC    = 0,
     BLINK_BLINK     = 1,
     BLINK_RUN       = 2,
@@ -47,9 +50,22 @@ enum BLINK_MODES {
 #define INIT_TCNT0  ADDITIONAL_PRESCALER(4)
 #define INIT_TCNT2  ADDITIONAL_PRESCALER(125)
 
+enum SELECT_MODES
+{
+    SELECT_NONE,
+    SELECT_COLOR,
+    SELECT_BLINK,
+};
+
+#define SELECT_WD_TIMEOUT 5000
+
+uint32_t clocks_ms = 0;
+
 uint8_t colors[LED_BUSES] = {0};
 int mode = 0;
-uint32_t clocks_ms = 0;
+int select = SELECT_NONE;
+uint32_t select_wd_clock = 0;
+int previous_mode = 0;
 
 void tick_led_buses(bool reset);
 void init_mode(int blink_mode, int color);
@@ -69,16 +85,20 @@ inline int get_color_mode()
     return mode & 0xf;
 }
 
+inline void reset_select_watchdog()
+{
+    select_wd_clock = clocks_ms;
+}
+
 int main(void)
 {
-    DDRD = 0xff & (~(1 << PORTD2));       // Port D for output excluding D2 (INT0)
-    DDRB = 0b111;                         // Bits 0..2 of port B for output
+    DDRD = 0b10000011;                      // Bits 0,1,7 of port D for output
+    DDRB = 0b00000111;                      // Bits 0..2 of port B for output to manage RGB lanes
 
-    PORTB = 0b11000000;                  // reset in port B, pull-up bits B6 and B7
-
-    PORTD =  0b11111001 | (1 << PORTD2);  // switch on all indicators, set high level to RST pin of counter chip, pull-up D2
-    _delay_ms(500);                       // show start of program
-    PORTD &= 0b00000000 | (1 << PORTD2);  // switch off all indicators plus set low level to RST pin of counter chip (reset the counter)
+    PORTB = 0b11000000;                     // reset in port B, pull-up bits B6 and B7
+    PORTD = 0b10000101;                     // switch indicator, set high level to RST pin of counter chip, pull-up D2
+    _delay_ms(50);                         // small pause
+    PORTD &= 0b11111110;                    // set low level to RST pin of counter chip (reset the counter)
 
     // Timer 0
     TIMSK |= (1 << TOIE0);                // enabled interrupts on overflow timer0
@@ -98,29 +118,66 @@ int main(void)
 
     // INT0
     MCUCR |= (1 << ISC01) | (1 << ISC00);  // set ISC01 and ISC00, the rising edge INT0
-    GICR |= (1 << INT0);                      // Turns on INT0
+    GICR |= (1 << INT0);                   // Turns on INT0
 
-    init_mode(BLINK_STATIC, RED);
+    init_mode(BLINK_STATIC, MUTABLE_CYCLE);
+    sei();  // Enable interrupts
 
     uint8_t prev_rotar = (PINB >> 6) & 0b11;
-    int x = 2;
     while (1)
     {
         uint8_t curr_rotar = (PINB >> 6) & 0b11;
         if (curr_rotar != prev_rotar)
         {
-            if (curr_rotar == 0b10)  // CW
+            if (select != SELECT_NONE)
             {
-                x = (x + 1) % 4;
-            } 
-            else if (curr_rotar == 0b01)  // CCW
-            {
-                x = x > 0 ? x - 1 : 3;
+                int delta = 0;
+                if (curr_rotar == 0b10)  // CW
+                {
+                    delta = 1;
+                }
+                else if (curr_rotar == 0b01)  // CCW
+                {
+                    delta = -1;
+                }
+                cli();
+                switch(select)
+                {
+                    case SELECT_COLOR:
+                        {
+                            int color_mode = get_color_mode() + delta;
+                            if (color_mode < 1)
+                            {
+                                color_mode = MUTABLE_MRANDOM;
+                            }
+                            else if (color_mode > MUTABLE_MRANDOM)
+                            {
+                                color_mode = 1;
+                            }
+                            init_mode(get_blink_mode(), color_mode);
+                        }
+                        break;
+                    case SELECT_BLINK:
+                        {
+                            int blink_mode = get_blink_mode() + delta;
+                            if (blink_mode < BLINK_STATIC)
+                            {
+                                blink_mode = BLINK_STRIP;
+                            } 
+                            else if (blink_mode > BLINK_STRIP)
+                            {
+                                blink_mode = BLINK_STATIC;
+                            }
+                            init_mode(blink_mode, get_color_mode());
+                        }
+                        break;
+                    default:
+                        break;
+                }
+                reset_select_watchdog();
+                sei();
             }
             prev_rotar = curr_rotar;
-            cli();
-            PORTD = (PORTD & 0b10000111) | (1 << (3 + x));
-            sei();
             _delay_ms(50);
         }
     }
@@ -128,7 +185,6 @@ int main(void)
 
 void init_mode(int blink_mode, int color)
 {
-    cli();  // Disable interrupts
     mode = (blink_mode << 4) | color;
     switch(color)
     {
@@ -166,8 +222,6 @@ void init_mode(int blink_mode, int color)
     {
         TCNT0 = INIT_TCNT0;  // about 1kHz for bus switching
     }
-
-    sei();  // Enable interrupts
 }
 
 // timer0 overflow interrupt
@@ -279,12 +333,26 @@ ISR (TIMER1_COMPA_vect)
         }
         first_off = !first_off;
     }
+
+    if (select != SELECT_NONE)
+    {
+        PORTD ^= 1 << PORTD7;
+    }
 }
 
 // timer2 overflow interrupt
 ISR (TIMER2_OVF_vect)
 {
     ++clocks_ms;
+
+    if (select != SELECT_NONE && (clocks_ms - select_wd_clock) >= SELECT_WD_TIMEOUT)
+    {
+        mode = previous_mode;
+        init_mode(get_blink_mode(), get_color_mode());
+        select = SELECT_NONE;
+        PORTD |= 1 << PORTD7;
+    }
+
     TCNT2 = INIT_TCNT2;
 }
 
@@ -295,7 +363,24 @@ ISR (INT0_vect)
 
     if ((clocks_ms - last_ms) > 50)
     {
-        PORTD ^= 0b10000000;
+        switch(select)
+        {
+            case SELECT_NONE:
+                previous_mode = mode & (~BLINK_OFF_FLAG);
+                select = SELECT_COLOR;
+                break;
+            case SELECT_COLOR:
+                select = SELECT_BLINK;
+                break;
+            case SELECT_BLINK:
+                init_mode(get_blink_mode(), get_color_mode());
+                select = SELECT_NONE;
+                PORTD |= 1 << PORTD7;
+                break;
+            default:
+                break;
+        }
+        reset_select_watchdog();
     }
 
     last_ms = clocks_ms;
