@@ -20,7 +20,8 @@
 #define LED_BUSES 5
 
 #define MUTABLE_COLOR_FLAG  (0b1000)
-enum COLORS {
+enum COLORS
+{
     BLACK           = (0b0000),
     RED             = (0b0100),
     GREEN           = (0b0010),
@@ -35,7 +36,8 @@ enum COLORS {
     MUTABLE_MRANDOM = (MUTABLE_COLOR_FLAG + 3),
 };
 
-enum BLINK_MODES {
+enum BLINK_MODES
+{
     BLINK_STATIC    = 0,
     BLINK_BLINK     = 1,
     BLINK_RUN       = 2,
@@ -47,9 +49,20 @@ enum BLINK_MODES {
 #define INIT_TCNT0  ADDITIONAL_PRESCALER(4)
 #define INIT_TCNT2  ADDITIONAL_PRESCALER(125)
 
+enum SELECT_MODES
+{
+    SELECT_NONE,
+    SELECT_COLOR,
+    SELECT_MODE,
+};
+
+#define SELECT_WD_TIMEOUT 5000
+
 uint8_t colors[LED_BUSES] = {0};
 int mode = 0;
+int select = SELECT_NONE;
 uint32_t clocks_ms = 0;
+uint32_t select_wd_clock = 0;
 
 void tick_led_buses(bool reset);
 void init_mode(int blink_mode, int color);
@@ -69,16 +82,23 @@ inline int get_color_mode()
     return mode & 0xf;
 }
 
+inline void reset_select_watchdog()
+{
+    select_wd_clock = clocks_ms;
+}
+
 int main(void)
 {
-    DDRD = 0xff & (~(1 << PORTD2));       // Port D for output excluding D2 (INT0)
-    DDRB = 0b111;                         // Bits 0..2 of port B for output
+    DDRD = ~((1 << PORTD2) | (1 << PORTD3));// Port D for output excluding D2/D3 (INT0 and INT1)
+    DDRB = 0b00000111;                      // Bits 0..2 of port B for output to manage RGB lanes
+    DDRC = 0b00111111;                      // Bits 0..5 port C for managing color mode
 
-    PORTB = 0b11000000;                  // reset in port B, pull-up bits B6 and B7
-
-    PORTD =  0b11111001 | (1 << PORTD2);  // switch on all indicators, set high level to RST pin of counter chip, pull-up D2
-    _delay_ms(500);                       // show start of program
-    PORTD &= 0b00000000 | (1 << PORTD2);  // switch off all indicators plus set low level to RST pin of counter chip (reset the counter)
+    PORTB = 0b11000000;                     // reset in port B, pull-up bits B6 and B7
+    PORTD = 0b11111101;                     // switch on mode and state indicators, set high level to RST pin of counter chip, pull-up D2,D3
+    PORTC = 0b00111111;                     // switch on color mode indicators
+    _delay_ms(1000);                         // show start of program
+    PORTD &= 0b10001110;                    // switch off indicators excluding state indicator, set low level to RST pin of counter chip (reset the counter)
+    PORTC &= 0b11000000;                    // switch of color mode indicators
 
     // Timer 0
     TIMSK |= (1 << TOIE0);                // enabled interrupts on overflow timer0
@@ -100,7 +120,8 @@ int main(void)
     MCUCR |= (1 << ISC01) | (1 << ISC00);  // set ISC01 and ISC00, the rising edge INT0
     GICR |= (1 << INT0);                      // Turns on INT0
 
-    init_mode(BLINK_STATIC, RED);
+    init_mode(BLINK_STATIC, MUTABLE_CYCLE);
+    sei();  // Enable interrupts
 
     uint8_t prev_rotar = (PINB >> 6) & 0b11;
     int x = 2;
@@ -119,7 +140,8 @@ int main(void)
             }
             prev_rotar = curr_rotar;
             cli();
-            PORTD = (PORTD & 0b10000111) | (1 << (3 + x));
+            //PORTD = (PORTD & 0b10000111) | (1 << (3 + x));
+            reset_select_watchdog();
             sei();
             _delay_ms(50);
         }
@@ -128,7 +150,6 @@ int main(void)
 
 void init_mode(int blink_mode, int color)
 {
-    cli();  // Disable interrupts
     mode = (blink_mode << 4) | color;
     switch(color)
     {
@@ -166,8 +187,6 @@ void init_mode(int blink_mode, int color)
     {
         TCNT0 = INIT_TCNT0;  // about 1kHz for bus switching
     }
-
-    sei();  // Enable interrupts
 }
 
 // timer0 overflow interrupt
@@ -179,7 +198,10 @@ ISR (TIMER0_OVF_vect)
     if (flag)
     {
         tick_led_buses(c == 0);
-        PORTB |= colors[c];
+        if (select == SELECT_NONE)
+        {
+            PORTB |= colors[c];
+        }
     }
     else
     {
@@ -285,6 +307,20 @@ ISR (TIMER1_COMPA_vect)
 ISR (TIMER2_OVF_vect)
 {
     ++clocks_ms;
+
+    if (select != SELECT_NONE && (clocks_ms % 100) == 0)
+    {
+        if ((clocks_ms - select_wd_clock) >= SELECT_WD_TIMEOUT)
+        {
+            select = SELECT_NONE;
+            PORTD |= 1 << PORTD7;
+        }
+        else
+        {
+            PORTD ^= 1 << PORTD7;
+        }
+    }
+
     TCNT2 = INIT_TCNT2;
 }
 
@@ -295,7 +331,17 @@ ISR (INT0_vect)
 
     if ((clocks_ms - last_ms) > 50)
     {
-        PORTD ^= 0b10000000;
+        if (select == SELECT_MODE)
+        {
+            // init_mode
+            select = SELECT_NONE;
+            PORTD |= 1 << PORTD7;
+        }
+        else
+        {
+            ++select;
+            reset_select_watchdog();
+        }
     }
 
     last_ms = clocks_ms;
