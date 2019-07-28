@@ -64,9 +64,8 @@ uint32_t clocks_ms = 0;
 uint8_t colors[LED_BUSES] = {0};
 int mode = 0;
 int select = SELECT_NONE;
-int selected_color = 0;
-int selected_blink = 0;
 uint32_t select_wd_clock = 0;
+int previous_mode = 0;
 
 void tick_led_buses(bool reset);
 void init_mode(int blink_mode, int color);
@@ -93,16 +92,13 @@ inline void reset_select_watchdog()
 
 int main(void)
 {
-    DDRD = ~((1 << PORTD2) | (1 << PORTD3));// Port D for output excluding D2/D3 (INT0 and INT1)
+    DDRD = 0b10000011;                      // Bits 0,1,7 of port D for output
     DDRB = 0b00000111;                      // Bits 0..2 of port B for output to manage RGB lanes
-    DDRC = 0b00111111;                      // Bits 0..5 port C for managing color mode
 
     PORTB = 0b11000000;                     // reset in port B, pull-up bits B6 and B7
-    PORTD = 0b11111101;                     // switch on mode and state indicators, set high level to RST pin of counter chip, pull-up D2,D3
-    PORTC = 0b00111111;                     // switch on color mode indicators
-    _delay_ms(1000);                         // show start of program
-    PORTD &= 0b10001110;                    // switch off indicators excluding state indicator, set low level to RST pin of counter chip (reset the counter)
-    PORTC &= 0b11000000;                    // switch of color mode indicators
+    PORTD = 0b10000101;                     // switch indicator, set high level to RST pin of counter chip, pull-up D2
+    _delay_ms(50);                         // small pause
+    PORTD &= 0b11111110;                    // set low level to RST pin of counter chip (reset the counter)
 
     // Timer 0
     TIMSK |= (1 << TOIE0);                // enabled interrupts on overflow timer0
@@ -148,17 +144,32 @@ int main(void)
                 switch(select)
                 {
                     case SELECT_COLOR:
-                        selected_color += delta;
-                        if (selected_color < 1)
                         {
-                            selected_color = MUTABLE_MRANDOM;
-                        } 
-                        else if (selected_color > MUTABLE_MRANDOM)
-                        {
-                            selected_color = 1;
+                            int color_mode = get_color_mode() + delta;
+                            if (color_mode < 1)
+                            {
+                                color_mode = MUTABLE_MRANDOM;
+                            }
+                            else if (color_mode > MUTABLE_MRANDOM)
+                            {
+                                color_mode = 1;
+                            }
+                            init_mode(get_blink_mode(), color_mode);
                         }
                         break;
                     case SELECT_BLINK:
+                        {
+                            int blink_mode = get_blink_mode() + delta;
+                            if (blink_mode < BLINK_STATIC)
+                            {
+                                blink_mode = BLINK_STRIP;
+                            } 
+                            else if (blink_mode > BLINK_STRIP)
+                            {
+                                blink_mode = BLINK_STATIC;
+                            }
+                            init_mode(blink_mode, get_color_mode());
+                        }
                         break;
                     default:
                         break;
@@ -222,10 +233,7 @@ ISR (TIMER0_OVF_vect)
     if (flag)
     {
         tick_led_buses(c == 0);
-        if (select == SELECT_NONE)
-        {
-            PORTB |= colors[c];
-        }
+        PORTB |= colors[c];
     }
     else
     {
@@ -329,27 +337,6 @@ ISR (TIMER1_COMPA_vect)
     if (select != SELECT_NONE)
     {
         PORTD ^= 1 << PORTD7;
-        PORTC &= 0b11000000;
-        static uint8_t curr_color = 1;
-        curr_color = curr_color % 7 + 1;
-        switch(selected_color)
-        {
-            case MUTABLE_CYCLE:
-                PORTC |= (1 << PORTC3) | curr_color;
-                break;
-            case MUTABLE_SRANDOM:
-                PORTC |= (1 << PORTC4) | (1 << PORTC3) | rand_color();
-                break;
-            case MUTABLE_ROLL:
-                PORTC |= (1 << PORTC5) | curr_color;
-                break;
-            case MUTABLE_MRANDOM:
-                PORTC |= (1 << PORTC5) | (1 << PORTC4) | rand_color();
-                break;
-            default:
-                PORTC |= selected_color; 
-                break;
-        }
     }
 }
 
@@ -360,9 +347,10 @@ ISR (TIMER2_OVF_vect)
 
     if (select != SELECT_NONE && (clocks_ms - select_wd_clock) >= SELECT_WD_TIMEOUT)
     {
+        mode = previous_mode;
+        init_mode(get_blink_mode(), get_color_mode());
         select = SELECT_NONE;
         PORTD |= 1 << PORTD7;
-        PORTC &= 0b11000000;
     }
 
     TCNT2 = INIT_TCNT2;
@@ -378,18 +366,16 @@ ISR (INT0_vect)
         switch(select)
         {
             case SELECT_NONE:
-                selected_blink = get_blink_mode();
-                selected_color = get_color_mode();
+                previous_mode = mode & (~BLINK_OFF_FLAG);
                 select = SELECT_COLOR;
                 break;
             case SELECT_COLOR:
                 select = SELECT_BLINK;
                 break;
             case SELECT_BLINK:
-                init_mode(selected_blink, selected_color);
+                init_mode(get_blink_mode(), get_color_mode());
                 select = SELECT_NONE;
                 PORTD |= 1 << PORTD7;
-                PORTC &= 0b11000000;
                 break;
             default:
                 break;
